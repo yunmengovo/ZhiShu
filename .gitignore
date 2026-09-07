@@ -1,0 +1,46 @@
+# Local secrets (only the placeholder template is versioned)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets/
+
+# Local tools, environments and Python build artifacts
+.DS_Store
+.venv/
+venv/
+.idea/
+.vscode/
+.playwright-cli/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+dist/
+build/
+tmp/
+output/
+logs/
+*.log
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.egg-info/
+
+# Uploaded documents, indexes, graphs and conversation history stay local
+data/*
+!data/raw/
+!data/processed/
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
