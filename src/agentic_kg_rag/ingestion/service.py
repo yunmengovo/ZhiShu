@@ -16,7 +16,7 @@ from agentic_kg_rag.ingestion.parsers import (
 )
 from agentic_kg_rag.knowledge_base.models import DEFAULT_KNOWLEDGE_BASE_ID
 
-PARSER_VERSION = "1"
+PARSER_VERSION = "2"
 
 
 class IngestionError(ValueError):

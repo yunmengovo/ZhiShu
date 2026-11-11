@@ -8,6 +8,7 @@ from starlette.concurrency import run_in_threadpool
 
 from agentic_kg_rag.ingestion.router import get_ingestion_service
 from agentic_kg_rag.ingestion.service import IngestionError
+from agentic_kg_rag.jobs.dependencies import get_job_manager
 from agentic_kg_rag.knowledge_base.dependencies import get_knowledge_base_store
 from agentic_kg_rag.knowledge_base.store import KnowledgeBaseError
 from agentic_kg_rag.knowledge_graph.router import get_knowledge_graph_service
@@ -42,7 +43,22 @@ def list_assets(
     knowledge_base_id: str | None = None,
 ) -> list[DocumentAsset]:
     try:
-        return service.list_assets(knowledge_base_id)
+        assets = service.list_assets(knowledge_base_id)
+        latest = {}
+        for job in get_job_manager().store.list(limit=200):
+            latest.setdefault(job.target_id, job)
+        for asset in assets:
+            job = latest.get(asset.document_id)
+            if job:
+                asset.build_status = job.status
+                asset.build_message = job.message
+                asset.build_error = job.error
+                for stage in job.result.get("stage_errors") or {}:
+                    if stage == "vector":
+                        asset.vector_status = "failed"
+                    elif stage == "graph":
+                        asset.graph_status = "failed"
+        return assets
     except KnowledgeBaseError as error:
         raise HTTPException(status_code=error.status_code, detail=str(error)) from error
 

@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from agentic_kg_rag.ingestion.service import DocumentIngestionService
 from agentic_kg_rag.knowledge_base.store import KnowledgeBaseStore
 from agentic_kg_rag.knowledge_graph.service import KnowledgeGraphService
 from agentic_kg_rag.rag.service import RagService
+from agentic_kg_rag.resilience import ModelCallError
 from agentic_kg_rag.workspace.models import (
     DocumentAsset,
     DocumentDeleteResult,
     DocumentRebuildResult,
     KnowledgeBaseDeleteResult,
 )
+
+
+class DocumentBuildError(RuntimeError):
+    def __init__(self, message: str, result: dict) -> None:
+        super().__init__(message)
+        self.result = result
 
 
 class WorkspaceService:
@@ -33,10 +42,10 @@ class WorkspaceService:
         for document in self.ingestion.list_documents(knowledge_base_id=knowledge_base_id):
             index = self.rag.document_index_status(document.document_id)
             try:
-                entities, relationships, _ = self.graph.store.document_counts(
+                entities, relationships, batches = self.graph.store.document_counts(
                     document.document_id
                 )
-                graph_status = "ready" if entities or relationships else "pending"
+                graph_status = "ready" if batches > 0 else "pending"
             except Exception:  # noqa: BLE001 - status must degrade without breaking the library
                 entities, relationships, graph_status = 0, 0, "unavailable"
             assets.append(
@@ -82,19 +91,44 @@ class WorkspaceService:
         reparse: bool,
         rebuild_vector: bool,
         rebuild_graph: bool,
+        progress: Callable[[int, str], None] | None = None,
     ) -> DocumentRebuildResult:
         document = self.ingestion.reprocess(document_id) if reparse else None
         loaded = self.ingestion.load(document_id)
         indexed_chunks = 0
         entity_count = 0
         relationship_count = 0
+        failures = {}
         if rebuild_vector:
-            indexed_chunks = self.rag.index_document(document_id).indexed_chunks
+            if progress:
+                progress(15, "正在构建向量索引（成功片段会缓存）")
+            try:
+                indexed_chunks = self.rag.index_document(document_id).indexed_chunks
+            except Exception as error:  # noqa: BLE001 - preserve independent stage results
+                failures["vector"] = (
+                    str(error)
+                    if isinstance(error, ModelCallError)
+                    else f"向量构建失败（{type(error).__name__}）"
+                )
         if rebuild_graph:
-            extraction = self.graph.extract_document(document_id)
-            entity_count = extraction.entity_count
-            relationship_count = extraction.relationship_count
-        return DocumentRebuildResult(
+            if progress:
+                progress(45, "正在构建知识图谱")
+            try:
+                extraction = self.graph.extract_document(
+                    document_id,
+                    progress=(lambda value, message: progress(45 + value // 2, message))
+                    if progress
+                    else None,
+                )
+                entity_count = extraction.entity_count
+                relationship_count = extraction.relationship_count
+            except Exception as error:  # noqa: BLE001 - independent stage boundary
+                failures["graph"] = (
+                    str(error)
+                    if isinstance(error, ModelCallError)
+                    else f"图谱构建失败（{type(error).__name__}）"
+                )
+        result = DocumentRebuildResult(
             document_id=document_id,
             filename=(document.filename if document else loaded.filename),
             reparsed=reparse,
@@ -102,6 +136,13 @@ class WorkspaceService:
             entity_count=entity_count,
             relationship_count=relationship_count,
         )
+        if failures:
+            partial = result.model_dump(mode="json")
+            partial["stage_errors"] = failures
+            raise DocumentBuildError(
+                "；".join(failures.values()) + "；已成功的阶段保留，可重新提交", partial
+            )
+        return result
 
     def delete_knowledge_base(self, knowledge_base_id: str) -> KnowledgeBaseDeleteResult:
         self.knowledge_bases.get(knowledge_base_id)

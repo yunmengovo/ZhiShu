@@ -6,6 +6,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from starlette.concurrency import run_in_threadpool
 
+from agentic_kg_rag.build_cache import BuildCache
+from agentic_kg_rag.clients import normalize_openai_base_url
 from agentic_kg_rag.config import get_settings
 from agentic_kg_rag.ingestion.router import get_ingestion_service
 from agentic_kg_rag.ingestion.service import IngestionError
@@ -21,6 +23,7 @@ from agentic_kg_rag.knowledge_graph.neo4j_store import Neo4jGraphStore
 from agentic_kg_rag.knowledge_graph.service import KnowledgeGraphError, KnowledgeGraphService
 from agentic_kg_rag.knowledge_graph.store import LocalGraphStore
 from agentic_kg_rag.rag.router import get_rag_service
+from agentic_kg_rag.resilience import ReliableChatModel
 
 router = APIRouter(prefix="/graph", tags=["knowledge-graph"])
 
@@ -46,11 +49,13 @@ def get_knowledge_graph_service() -> KnowledgeGraphService:
     return KnowledgeGraphService(
         ingestion_service=get_ingestion_service(),
         store=store,
-        chat_model=rag_service.chat_model,
+        chat_model=ReliableChatModel(rag_service.chat_model.model, stream=True),
         model_name=settings.chat_model,
         mode=mode,
         batch_chars=settings.kg_extraction_batch_chars,
         default_top_k=settings.graph_top_k,
+        cache=BuildCache(settings.data_dir / "cache" / "graph_batches.db"),
+        cache_namespace=normalize_openai_base_url(settings.chat_base_url) or "",
     )
 
 

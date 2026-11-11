@@ -27,8 +27,24 @@ class RetrievalRuntimeConfig(RuntimeSection):
     rrf_constant: int = Field(default=60, ge=1, le=200)
 
 
+class ModelRuntimeConfig(RuntimeSection):
+    chat_timeout_seconds: float = Field(default=90, ge=5, le=300)
+    graph_generation_seconds: float = Field(default=180, ge=30, le=600)
+    embedding_timeout_seconds: float = Field(default=30, ge=5, le=120)
+    max_attempts: int = Field(default=3, ge=1, le=5)
+    retry_budget_seconds: float = Field(default=300, ge=10, le=600)
+    retry_base_delay: float = Field(default=1, ge=0.1, le=10)
+    max_retry_delay: float = Field(default=15, ge=1, le=60)
+    chat_concurrency: int = Field(default=2, ge=1, le=8)
+    embedding_concurrency: int = Field(default=2, ge=1, le=8)
+    # Conservative UTF-8 byte budgets do not assume an OpenAI tokenizer for BGE.
+    bge_input_bytes: int = Field(default=480, ge=64, le=500)
+    embedding_input_bytes: int = Field(default=1800, ge=64, le=8000)
+    embedding_batch_size: int = Field(default=8, ge=1, le=64)
+
+
 class KnowledgeGraphRuntimeConfig(RuntimeSection):
-    extraction_batch_chars: int = Field(default=12_000, ge=1000, le=100_000)
+    extraction_batch_chars: int = Field(default=2400, ge=1000, le=100_000)
     visualization_max_relations: int = Field(default=120, ge=10, le=500)
 
 
@@ -63,6 +79,7 @@ class MemoryRuntimeConfig(RuntimeSection):
 
 
 class JobRuntimeConfig(RuntimeSection):
+    max_pending: int = Field(default=100, ge=1, le=1000)
     workers: int = Field(default=4, ge=1, le=16)
     retained_jobs: int = Field(default=500, ge=20, le=5000)
 
@@ -74,6 +91,7 @@ class MinerURuntimeConfig(RuntimeSection):
 
 
 class RuntimeConfig(RuntimeSection):
+    models: ModelRuntimeConfig = ModelRuntimeConfig()
     ingestion: IngestionRuntimeConfig = IngestionRuntimeConfig()
     retrieval: RetrievalRuntimeConfig = RetrievalRuntimeConfig()
     knowledge_graph: KnowledgeGraphRuntimeConfig = KnowledgeGraphRuntimeConfig()

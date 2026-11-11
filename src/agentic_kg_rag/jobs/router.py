@@ -1,29 +1,18 @@
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from agentic_kg_rag.config import get_settings
-from agentic_kg_rag.jobs.manager import JobManager, ProgressCallback
+from agentic_kg_rag.jobs.dependencies import get_job_manager
+from agentic_kg_rag.jobs.manager import JobConflictError, JobManager, ProgressCallback
 from agentic_kg_rag.jobs.models import JobInfo
-from agentic_kg_rag.jobs.store import JobNotFoundError, JobStore
-from agentic_kg_rag.runtime_config import RUNTIME
+from agentic_kg_rag.jobs.store import JobNotFoundError
 from agentic_kg_rag.workspace.models import DocumentRebuildRequest
 from agentic_kg_rag.workspace.router import get_workspace_service
 from agentic_kg_rag.workspace.service import WorkspaceService
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
-
-
-@lru_cache
-def get_job_manager() -> JobManager:
-    settings = get_settings()
-    return JobManager(
-        JobStore(settings.jobs_path, retained_jobs=RUNTIME.jobs.retained_jobs),
-        workers=RUNTIME.jobs.workers,
-    )
 
 
 @router.get("", response_model=list[JobInfo])
@@ -61,11 +50,17 @@ def submit_document_rebuild(
             reparse=request.reparse,
             rebuild_vector=request.rebuild_vector,
             rebuild_graph=request.rebuild_graph,
+            progress=progress,
         )
         progress(95, "正在写入最终状态")
         return result.model_dump(mode="json")
 
-    return manager.submit("document_rebuild", document_id, run)
+    try:
+        return manager.submit(
+            "document_rebuild", document_id, run, request_key=request.model_dump_json()
+        )
+    except JobConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.post("/knowledge-bases/{knowledge_base_id}/rebuild", response_model=JobInfo)

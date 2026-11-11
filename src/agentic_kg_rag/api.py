@@ -28,12 +28,16 @@ from agentic_kg_rag.memory.router import get_memory_service
 from agentic_kg_rag.memory.router import router as memory_router
 from agentic_kg_rag.rag.router import get_rag_service
 from agentic_kg_rag.rag.router import router as rag_router
+from agentic_kg_rag.resilience import ModelCallError
 from agentic_kg_rag.workspace.router import get_workspace_service
 from agentic_kg_rag.workspace.router import router as workspace_router
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Initialize once before accepting requests; concurrent lazy construction can
+    # otherwise mistake a newly running job for a previous-process interruption.
+    get_job_manager()
     yield
     get_agent_service.cache_clear()
     get_memory_service.cache_clear()
@@ -77,6 +81,11 @@ async def upstream_model_error_handler(
 
 app.add_exception_handler(ModelError, upstream_model_error_handler)
 app.add_exception_handler(OpenAIError, upstream_model_error_handler)
+
+
+@app.exception_handler(ModelCallError)
+async def model_call_error_handler(request: Request, error: ModelCallError) -> JSONResponse:
+    return JSONResponse(status_code=error.status_code, content={"detail": str(error)})
 
 
 @app.get("/health")

@@ -20,6 +20,9 @@ class DocumentAsset(BaseModel):
     entity_count: int = Field(ge=0)
     relationship_count: int = Field(ge=0)
     graph_status: str
+    build_status: str = ""
+    build_message: str = ""
+    build_error: str = ""
 
 
 class DocumentDeleteResult(BaseModel):

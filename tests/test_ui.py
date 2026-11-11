@@ -37,6 +37,7 @@ class FakeBackend:
             }
         ]
         self.index_calls: list[str] = []
+        self.build_calls: list[dict[str, Any]] = []
         self.conversations = [
             {
                 "session_id": "session-test",
@@ -165,6 +166,10 @@ class FakeBackend:
 
     def list_jobs(self) -> list[dict[str, Any]]:
         return []
+
+    def submit_document_rebuild(self, document_id: str, **options: Any) -> dict[str, Any]:
+        self.build_calls.append({"document_id": document_id, **options})
+        return {"job_id": f"job-{len(self.build_calls)}", "status": "queued"}
 
     def index_document(self, document_id: str) -> dict[str, Any]:
         self.index_calls.append(document_id)
@@ -333,10 +338,30 @@ def test_upload_and_index_selected(tmp_path: Path) -> None:
         backend,
     )
 
-    assert "已索引 2 个分块" in operation
-    assert "agentic-rag.mdx" in index_operation
-    assert "2 个实体" in graph_operation
-    assert backend.index_calls == ["doc-notes", "doc-langgraph"]
+    assert "构建任务" in operation
+    assert "向量索引任务" in index_operation
+    assert "图谱抽取任务" in graph_operation
+    assert backend.index_calls == []  # UI never blocks waiting for model generation.
+    assert backend.build_calls == [
+        {
+            "document_id": "doc-notes",
+            "reparse": False,
+            "rebuild_vector": True,
+            "rebuild_graph": False,
+        },
+        {
+            "document_id": "doc-langgraph",
+            "reparse": False,
+            "rebuild_vector": True,
+            "rebuild_graph": False,
+        },
+        {
+            "document_id": "doc-langgraph",
+            "reparse": False,
+            "rebuild_vector": False,
+            "rebuild_graph": True,
+        },
+    ]
 
 
 def test_ask_question_updates_chat_and_evidence() -> None:

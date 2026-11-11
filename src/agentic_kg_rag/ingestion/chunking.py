@@ -63,13 +63,24 @@ def build_chunks(
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", "。", "！", "？", ". ", " ", ""],
+        add_start_index=True,
+        keep_separator="end",
+        separators=["\n\n", "\n", "。", "！", "？", ". ", "；", "，", " ", ""],
     )
     chunks: list[DocumentChunk] = []
 
     for segment in _group_blocks(blocks):
         text = "\n".join(segment.texts)
-        for piece in splitter.split_text(text):
+        spans = []
+        offset = 0
+        for block_id, block_text in zip(segment.block_ids, segment.texts, strict=True):
+            spans.append((block_id, offset, offset + len(block_text)))
+            offset += len(block_text) + 1
+        for split in splitter.create_documents([text]):
+            piece = split.page_content
+            start = split.metadata["start_index"]
+            end = start + len(piece)
+            source_ids = [bid for bid, left, right in spans if left < end and right > start]
             order = len(chunks)
             digest = hashlib.sha256(f"{document_id}:{order}:{piece}".encode()).hexdigest()[:16]
             chunks.append(
@@ -78,7 +89,12 @@ def build_chunks(
                     document_id=document_id,
                     text=piece,
                     order=order,
-                    block_ids=segment.block_ids,
+                    block_ids=source_ids,
+                    metadata={
+                        "segment_start": start,
+                        "segment_end": end,
+                        "content_sha256": hashlib.sha256(piece.encode()).hexdigest(),
+                    },
                     page_start=min(segment.pages) if segment.pages else None,
                     page_end=max(segment.pages) if segment.pages else None,
                     section_title=segment.section_title,

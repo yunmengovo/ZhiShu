@@ -44,6 +44,7 @@ class RagService:
         self.ingestion_service = ingestion_service
         self.qdrant = qdrant
         self.embeddings = embeddings
+        self.embedding_profile = getattr(embeddings, "profile", None)
         self.chat_model = chat_model
         self.collection_name = collection_name
         self.default_top_k = default_top_k
@@ -58,7 +59,14 @@ class RagService:
         if not document.chunks:
             raise RagError(f"document has no chunks: {document_id}")
 
-        vectors = self.embeddings.embed_documents([chunk.text for chunk in document.chunks])
+        # Deterministic context enrichment, with no LLM-generated facts.
+        texts = []
+        for chunk in document.chunks:
+            context = " / ".join(
+                dict.fromkeys(value for value in [document.title, chunk.section_title] if value)
+            )[:120]
+            texts.append(f"{context}\n{chunk.text}" if context else chunk.text)
+        vectors = self.embeddings.embed_documents(texts)
         if len(vectors) != len(document.chunks) or not vectors or not vectors[0]:
             raise RagError("embedding service returned invalid vectors")
         dimension = len(vectors[0])
@@ -73,11 +81,6 @@ class RagService:
                     match=models.MatchValue(value=document.document_id),
                 )
             ]
-        )
-        self.qdrant.delete(
-            collection_name=self.collection_name,
-            points_selector=models.FilterSelector(filter=document_filter),
-            wait=True,
         )
         points = []
         for chunk, vector in zip(document.chunks, vectors, strict=True):
@@ -94,6 +97,7 @@ class RagService:
                 "order": chunk.order,
                 "block_ids": chunk.block_ids,
                 "metadata": chunk.metadata,
+                "embedding_profile": self.embedding_profile,
             }
             points.append(
                 models.PointStruct(
@@ -105,6 +109,17 @@ class RagService:
         self.qdrant.upsert(
             collection_name=self.collection_name,
             points=points,
+            wait=True,
+        )
+        # Upsert first: an upstream failure must never erase the working index.
+        self.qdrant.delete(
+            collection_name=self.collection_name,
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=document_filter.must,
+                    must_not=[models.HasIdCondition(has_id=[point.id for point in points])],
+                )
+            ),
             wait=True,
         )
         return IndexResult(
@@ -134,7 +149,7 @@ class RagService:
             )
         count = self.qdrant.count(
             collection_name=self.collection_name,
-            count_filter=self._document_filter(document_id),
+            count_filter=self._profile_filter(self._document_filter(document_id)),
             exact=True,
         ).count
         return DocumentIndexStatus(
@@ -183,7 +198,7 @@ class RagService:
         result = self.qdrant.query_points(
             collection_name=self.collection_name,
             query=vector,
-            query_filter=query_filter,
+            query_filter=self._profile_filter(query_filter),
             limit=top_k or self.default_top_k,
             with_payload=True,
             with_vectors=False,
@@ -269,6 +284,7 @@ class RagService:
         if ready:
             indexed_chunks = self.qdrant.count(
                 collection_name=self.collection_name,
+                count_filter=self._profile_filter(None),
                 exact=True,
             ).count
         return RagStatus(
@@ -298,6 +314,18 @@ class RagService:
                 "embedding dimension differs from the existing collection; "
                 "use a new QDRANT_COLLECTION name or rebuild the index"
             )
+
+    def _profile_filter(self, existing: models.Filter | None) -> models.Filter | None:
+        if self.embedding_profile is None:
+            return existing
+        must = list(existing.must or []) if existing else []
+        must.append(
+            models.FieldCondition(
+                key="embedding_profile",
+                match=models.MatchValue(value=self.embedding_profile),
+            )
+        )
+        return models.Filter(must=must)
 
     @staticmethod
     def _document_filter(document_id: str) -> models.Filter:

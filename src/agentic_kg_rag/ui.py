@@ -19,7 +19,7 @@ DOCUMENT_HEADERS = [
     "分块数",
     "向量状态",
     "实体 / 关系",
-    "解析状态",
+    "解析 / 构建状态",
     "文档 ID",
 ]
 SUPPORTED_FILE_TYPES = [".pdf", ".docx", ".md", ".markdown", ".mdx", ".txt", ".html", ".htm"]
@@ -352,8 +352,12 @@ class BackendClient:
             except ValueError:
                 detail = error.response.text
             raise BackendError(f"后端请求失败（{error.response.status_code}）：{detail}") from error
+        except httpx.TimeoutException as error:
+            raise BackendError(
+                "后端请求超时，服务可能仍在处理。请先查看任务状态，勿重复提交。"
+            ) from error
         except httpx.HTTPError as error:
-            raise BackendError(f"无法连接 API：{self.base_url}（{error}）") from error
+            raise BackendError(f"无法连接 API：{self.base_url}，请检查后端是否运行") from error
 
     def health(self) -> dict[str, Any]:
         return self._request("GET", "/health")
@@ -428,9 +432,7 @@ class BackendClient:
             for path in paths:
                 file_path = Path(path)
                 stream = closing.enter_context(file_path.open("rb"))
-                content_type = (
-                    mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-                )
+                content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
                 uploads.append(("files", (file_path.name, stream, content_type)))
             return self._request(
                 "POST",
@@ -448,11 +450,22 @@ class BackendClient:
     def delete_document(self, document_id: str) -> dict[str, Any]:
         return self._request("DELETE", f"/documents/{document_id}")
 
-    def submit_document_rebuild(self, document_id: str) -> dict[str, Any]:
+    def submit_document_rebuild(
+        self,
+        document_id: str,
+        *,
+        reparse: bool = True,
+        rebuild_vector: bool = True,
+        rebuild_graph: bool = True,
+    ) -> dict[str, Any]:
         return self._request(
             "POST",
             f"/jobs/documents/{document_id}/rebuild",
-            json={"reparse": True, "rebuild_vector": True, "rebuild_graph": True},
+            json={
+                "reparse": reparse,
+                "rebuild_vector": rebuild_vector,
+                "rebuild_graph": rebuild_graph,
+            },
         )
 
     def list_jobs(self) -> list[dict[str, Any]]:
@@ -541,7 +554,14 @@ def _document_rows(documents: list[dict[str, Any]]) -> list[list[Any]]:
             item["chunk_count"],
             f"{item.get('vector_status', 'unknown')} · {item.get('indexed_chunks', 0)}",
             f"{item.get('entity_count', 0)} / {item.get('relationship_count', 0)}",
-            item["status"],
+            item["status"]
+            + " / "
+            + {
+                "queued": "排队中",
+                "running": "构建中",
+                "failed": "构建失败",
+                "succeeded": "已完成",
+            }.get(item.get("build_status", ""), "未构建"),
             item["document_id"],
         ]
         for item in documents
@@ -570,19 +590,19 @@ def _status_markdown(
     return (
         '<div class="status-grid">'
         '<div class="status-card"><div class="label"><i class="dot"></i>系统服务</div>'
-        '<strong>API 在线</strong><small>文档与问答接口可用</small></div>'
+        "<strong>API 在线</strong><small>文档与问答接口可用</small></div>"
         '<div class="status-card"><div class="label"><i class="dot"></i>知识库</div>'
-        f'<strong>{knowledge_base_count} 个空间</strong><small>{document_count} 份文档 · '
-        f'{status["indexed_chunks"]} 个向量</small></div>'
+        f"<strong>{knowledge_base_count} 个空间</strong><small>{document_count} 份文档 · "
+        f"{status['indexed_chunks']} 个向量</small></div>"
         '<div class="status-card"><div class="label"><i class="dot"></i>向量检索</div>'
-        f'<strong>{html.escape(str(status["mode"]))}</strong><small>Qdrant · {collection_state}</small></div>'
+        f"<strong>{html.escape(str(status['mode']))}</strong><small>Qdrant · {collection_state}</small></div>"
         f'<div class="status-card"><div class="label"><i class="dot{graph_dot}"></i>知识图谱</div>'
-        f'<strong>{html.escape(str(graph_backend))}</strong><small>{graph_status["entity_count"]} 个实体 · '
-        f'{graph_status["relationship_count"]} 条关系 {graph_icon}</small></div>'
+        f"<strong>{html.escape(str(graph_backend))}</strong><small>{graph_status['entity_count']} 个实体 · "
+        f"{graph_status['relationship_count']} 条关系 {graph_icon}</small></div>"
         '<div class="status-card"><div class="label"><i class="dot"></i>模型服务</div>'
-        f'<strong>{chat_state} / {embedding_state}</strong><small>Chat / Embedding</small></div>'
+        f"<strong>{chat_state} / {embedding_state}</strong><small>Chat / Embedding</small></div>"
         '<div class="status-card"><div class="label"><i class="dot"></i>可选增强</div>'
-        f'<strong>{optional_count} / 3 已启用</strong><small>MinerU / Tavily / LangSmith</small></div>'
+        f"<strong>{optional_count} / 3 已启用</strong><small>MinerU / Tavily / LangSmith</small></div>"
         "</div>"
     )
 
@@ -619,7 +639,7 @@ def render_memory_status(memory: dict[str, Any] | None) -> str:
         return (
             '<div class="memory-shell"><div class="card-heading"><div>'
             '<span class="icon">忆</span><strong>会话记忆</strong>'
-            '<p>尚未建立会话</p></div></div></div>'
+            "<p>尚未建立会话</p></div></div></div>"
         )
     threshold = memory.get("max_tokens", 0)
     context_window = memory.get("context_window_tokens", threshold)
@@ -634,9 +654,9 @@ def render_memory_status(memory: dict[str, Any] | None) -> str:
     return (
         '<div class="memory-shell"><div class="card-heading"><div>'
         '<span class="icon">忆</span><strong>会话记忆</strong>'
-        '<p>长期保留关键信息，按预算自动滚动压缩</p></div></div>'
+        "<p>长期保留关键信息，按预算自动滚动压缩</p></div></div>"
         '<div class="memory-top"><span>会话记忆用量</span>'
-        f'<div><strong>{memory["token_count"]:,}</strong><small> / {threshold:,} tokens</small></div></div>'
+        f"<div><strong>{memory['token_count']:,}</strong><small> / {threshold:,} tokens</small></div></div>"
         f'<div class="memory-track"><i style="width:{percentage:.2f}%"></i></div>'
         '<div class="memory-grid">'
         f'<div class="memory-stat"><span>模型窗口</span><strong>{context_window:,}</strong></div>'
@@ -653,7 +673,7 @@ def render_memory_notice(message: str, *, error: bool = False) -> str:
     return (
         '<div class="memory-shell"><div class="card-heading"><div>'
         '<span class="icon">忆</span><strong>会话记忆</strong>'
-        f'<p>{html.escape(message)}</p></div></div>'
+        f"<p>{html.escape(message)}</p></div></div>"
         f'<div class="{tone}">{html.escape(message)}</div></div>'
     )
 
@@ -771,9 +791,9 @@ def render_jobs(jobs: list[dict[str, Any]]) -> str:
         message = job.get("error") or job.get("message") or ""
         rows.append(
             '<div class="job-row">'
-            f'<strong>{html.escape(str(job.get("job_type", "task")))}</strong>'
-            f'<span>{html.escape(str(status))} · {progress}%</span>'
-            f'<small>{html.escape(str(message))}</small>'
+            f"<strong>{html.escape(str(job.get('job_type', 'task')))}</strong>"
+            f"<span>{html.escape(str(status))} · {progress}%</span>"
+            f"<small>{html.escape(str(message))}</small>"
             f'<div class="job-track"><i style="width:{progress}%"></i></div></div>'
         )
     rows.append("</div>")
@@ -836,7 +856,7 @@ def render_graph_visualization(graph: dict[str, Any]) -> str:
         label = str(node["label"])
         short_label = label if len(label) <= 15 else label[:14] + "…"
         svg.append(
-            f'<g><title>{html.escape(label)} · {html.escape(entity_type)}</title>'
+            f"<g><title>{html.escape(label)} · {html.escape(entity_type)}</title>"
             f'<circle cx="{x:.1f}" cy="{y:.1f}" r="22" fill="{color}" opacity=".94"/>'
             f'<text x="{x:.1f}" y="{y + 4:.1f}" text-anchor="middle" font-size="9" '
             f'font-weight="700" fill="#fff">{html.escape(short_label[:7])}</text>'
@@ -921,6 +941,32 @@ def refresh_assets(
         return [], gr.update(choices=[], value=[]), render_graph_visualization({}), render_jobs([])
 
 
+def poll_build_status(
+    knowledge_base_id: str | None,
+    client: BackendClient,
+    selected_ids: list[str] | None = None,
+    query: str = "",
+) -> tuple[Any, Any, Any]:
+    try:
+        if not knowledge_base_id:
+            return gr.skip(), gr.skip(), gr.skip()
+        assets = client.list_assets(knowledge_base_id)
+        graph = (
+            client.graph_subgraph(
+                query=query,
+                document_ids=selected_ids or [item["document_id"] for item in assets],
+                limit=80,
+            )
+            if assets
+            else {}
+        )
+        ids = {item["document_id"] for item in assets}
+        jobs = [job for job in client.list_jobs() if job.get("target_id") in ids]
+        return _document_rows(assets), render_jobs(jobs), render_graph_visualization(graph)
+    except BackendError:
+        return gr.skip(), gr.skip(), gr.skip()
+
+
 def refresh_question_scope(
     knowledge_base_id: str | None,
     client: BackendClient,
@@ -993,15 +1039,17 @@ def upload_documents(
             message = (
                 f"- `{document['filename']}`：解析为 {document['chunk_count']} 个分块{duplicate}"
             )
-            if auto_index and document["chunk_count"] > 0:
-                indexed = client.index_document(document["document_id"])
-                message += f"，已索引 {indexed['indexed_chunks']} 个分块"
-            if auto_graph and document["chunk_count"] > 0:
-                extracted = client.extract_graph(document["document_id"])
-                message += (
-                    f"，图谱 {extracted['entity_count']} 个实体 / "
-                    f"{extracted['relationship_count']} 条关系"
-                )
+            if (auto_index or auto_graph) and document["chunk_count"] > 0:
+                try:
+                    job = client.submit_document_rebuild(
+                        document["document_id"],
+                        reparse=False,
+                        rebuild_vector=auto_index,
+                        rebuild_graph=auto_graph,
+                    )
+                    message += f"，构建任务 `{job['job_id']}` 已提交，进度将在任务面板更新"
+                except BackendError as error:
+                    message += f"，构建未提交：{error}（解析结果已保留）"
             results.append(message)
         operation = "### 批量导入完成\n" + "\n".join(results)
     except BackendError as error:
@@ -1028,13 +1076,18 @@ def index_selected(
         snapshot = refresh_workspace(client, knowledge_base_id)
         return "请选择需要建立索引的文档。", snapshot[0], snapshot[3], snapshot[6]
     results = []
-    try:
-        for document_id in document_ids:
-            indexed = client.index_document(document_id)
-            results.append(f"- `{indexed['filename']}`：{indexed['indexed_chunks']} 个分块")
-        operation = "### 索引完成\n" + "\n".join(results)
-    except BackendError as error:
-        operation = f"### 索引中断\n🔴 {error}\n\n" + "\n".join(results)
+    for document_id in document_ids:
+        try:
+            job = client.submit_document_rebuild(
+                document_id,
+                reparse=False,
+                rebuild_vector=True,
+                rebuild_graph=False,
+            )
+            results.append(f"- `{document_id}`：向量索引任务 `{job['job_id']}` 已提交")
+        except BackendError as error:
+            results.append(f"- `{document_id}`：🔴 {error}")
+    operation = "### 已提交后台索引\n" + "\n".join(results)
     snapshot = refresh_workspace(client, knowledge_base_id)
     return operation, snapshot[0], snapshot[3], snapshot[6]
 
@@ -1048,16 +1101,18 @@ def extract_selected_graph(
         snapshot = refresh_workspace(client, knowledge_base_id)
         return "请选择需要抽取知识图谱的文档。", snapshot[0], snapshot[3], snapshot[6]
     results = []
-    try:
-        for document_id in document_ids:
-            extracted = client.extract_graph(document_id)
-            results.append(
-                f"- `{extracted['filename']}`：{extracted['entity_count']} 个实体，"
-                f"{extracted['relationship_count']} 条关系，{extracted['batches']} 个批次"
+    for document_id in document_ids:
+        try:
+            job = client.submit_document_rebuild(
+                document_id,
+                reparse=False,
+                rebuild_vector=False,
+                rebuild_graph=True,
             )
-        operation = "### 图谱抽取完成\n" + "\n".join(results)
-    except BackendError as error:
-        operation = f"### 图谱抽取中断\n🔴 {error}\n\n" + "\n".join(results)
+            results.append(f"- `{document_id}`：图谱抽取任务 `{job['job_id']}` 已提交")
+        except BackendError as error:
+            results.append(f"- `{document_id}`：🔴 {error}")
+    operation = "### 已提交后台图谱抽取\n" + "\n".join(results)
     snapshot = refresh_workspace(client, knowledge_base_id)
     return operation, snapshot[0], snapshot[3], snapshot[6]
 
@@ -1103,9 +1158,8 @@ def delete_knowledge_base(
     try:
         result = client.delete_knowledge_base(knowledge_base_id)
         warnings = "\n".join(f"- ⚠ {item}" for item in result.get("warnings", []))
-        message = (
-            f"### 知识空间已删除\n同步删除 {result['deleted_documents']} 份文档。"
-            + (f"\n{warnings}" if warnings else "")
+        message = f"### 知识空间已删除\n同步删除 {result['deleted_documents']} 份文档。" + (
+            f"\n{warnings}" if warnings else ""
         )
     except BackendError as error:
         message = f"### 删除失败\n🔴 {error}"
@@ -1226,9 +1280,7 @@ def render_agent_trace(result: dict[str, Any], mode: str) -> str:
     if result.get("used_web_search"):
         lines.append("联网补充：`Tavily`（仅本地证据不足且问题具有时效性时启用）")
     if result.get("citation_warnings"):
-        lines.append(
-            "引用校验：⚠ " + "；".join(str(item) for item in result["citation_warnings"])
-        )
+        lines.append("引用校验：⚠ " + "；".join(str(item) for item in result["citation_warnings"]))
     lines.extend(
         f"{index}. **{step['node']}** · `{step['action']}` — {step['detail']}"
         for index, step in enumerate(steps, 1)
@@ -1329,7 +1381,7 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
             with gr.Column(scale=8):
                 gr.HTML(
                     '<div class="section-title"><h2>运行概览</h2>'
-                    '<p>知识、检索、模型与图谱服务状态</p></div>'
+                    "<p>知识、检索、模型与图谱服务状态</p></div>"
                 )
             refresh_button = gr.Button("↻ 刷新状态", size="sm", scale=1)
         status_panel = gr.HTML('<div class="status-error">正在连接服务…</div>')
@@ -1340,7 +1392,7 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                     '<div class="side-brand"><div class="side-brand-mark">枢</div>'
                     '<div class="side-brand-copy"><strong>知枢</strong><span>ZHISHU</span></div></div>'
                     '<div class="side-nav-title"><strong>工作台导航</strong>'
-                    '<span>WORKSPACE</span></div>'
+                    "<span>WORKSPACE</span></div>"
                 )
                 workspace_nav = gr.Radio(
                     choices=["知识空间", "智能问答"],
@@ -1354,7 +1406,7 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                     with gr.Column(elem_classes=["surface-card", "manager-card"]):
                         gr.HTML(
                             '<div class="card-heading"><div><span class="icon">域</span>'
-                            '<strong>知识空间管理</strong><p>不同空间的文档、检索范围与图谱互相隔离</p>'
+                            "<strong>知识空间管理</strong><p>不同空间的文档、检索范围与图谱互相隔离</p>"
                             "</div></div>"
                         )
                         with gr.Row(elem_classes="manager-row"):
@@ -1387,7 +1439,7 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                         ):
                             gr.HTML(
                                 '<div class="card-heading"><div><span class="icon">入</span>'
-                                '<strong>批量导入资料</strong><p>支持 PDF、Word、Markdown、文本与 HTML</p>'
+                                "<strong>批量导入资料</strong><p>支持 PDF、Word、Markdown、文本与 HTML</p>"
                                 "</div></div>"
                             )
                             files = gr.File(
@@ -1420,7 +1472,7 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                         ):
                             gr.HTML(
                                 '<div class="card-heading"><div><span class="icon">库</span>'
-                                '<strong>知识资产</strong><p>统一查看解析、向量索引与图谱状态</p>'
+                                "<strong>知识资产</strong><p>统一查看解析、向量索引与图谱状态</p>"
                                 "</div></div>"
                             )
                             document_table = gr.Dataframe(
@@ -1455,7 +1507,7 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                     with gr.Column(elem_classes=["surface-card", "graph-card"]):
                         gr.HTML(
                             '<div class="card-heading"><div><span class="icon">图</span>'
-                            '<strong>知识图谱</strong><p>按当前空间、所选文档或实体关键词查看关系网络</p>'
+                            "<strong>知识图谱</strong><p>按当前空间、所选文档或实体关键词查看关系网络</p>"
                             "</div></div>"
                         )
                         with gr.Row(elem_classes="manager-row"):
@@ -1472,7 +1524,7 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                             with gr.Column(scale=8):
                                 gr.HTML(
                                     '<div class="card-heading"><div><span class="icon">序</span>'
-                                    '<strong>后台任务</strong><p>长耗时重建任务可离开页面继续运行</p>'
+                                    "<strong>后台任务</strong><p>长耗时重建任务可离开页面继续运行</p>"
                                     "</div></div>"
                                 )
                             refresh_jobs_button = gr.Button("刷新任务", size="sm", scale=1)
@@ -1486,7 +1538,7 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                         ):
                             gr.HTML(
                                 '<div class="card-heading"><div><span class="icon">话</span>'
-                                '<strong>会话工作区</strong><p>切换历史会话，记忆会随会话自动恢复</p>'
+                                "<strong>会话工作区</strong><p>切换历史会话，记忆会随会话自动恢复</p>"
                                 "</div></div>"
                             )
                             qa_knowledge_base_selector = gr.Dropdown(
@@ -1517,13 +1569,16 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                             memory_panel = gr.HTML(render_memory_status(None))
 
                     with gr.Row(elem_classes="qa-main-grid"):
-                        with gr.Column(
-                            scale=7,
-                            elem_classes="qa-main-column",
-                        ), gr.Column(elem_classes=["surface-card", "chat-card"]):
+                        with (
+                            gr.Column(
+                                scale=7,
+                                elem_classes="qa-main-column",
+                            ),
+                            gr.Column(elem_classes=["surface-card", "chat-card"]),
+                        ):
                             gr.HTML(
                                 '<div class="card-heading"><div><span class="icon">答</span>'
-                                '<strong>知枢问答</strong><p>回答内容保留文档引用与图谱关系来源</p>'
+                                "<strong>知枢问答</strong><p>回答内容保留文档引用与图谱关系来源</p>"
                                 "</div></div>"
                             )
                             chatbot = gr.Chatbot(
@@ -1541,7 +1596,7 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                             with gr.Column(elem_classes=["surface-card", "composer-card"]):
                                 gr.HTML(
                                     '<div class="card-heading"><div><span class="icon">问</span>'
-                                    '<strong>发起问题</strong><p>设定检索范围与回答方式</p>'
+                                    "<strong>发起问题</strong><p>设定检索范围与回答方式</p>"
                                     "</div></div>"
                                 )
                                 with gr.Row(elem_classes="composer-actions"):
@@ -1597,7 +1652,7 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                             with gr.Column(elem_classes=["surface-card", "trace-card"]):
                                 gr.HTML(
                                     '<div class="card-heading"><div><span class="icon">迹</span>'
-                                    '<strong>推理与证据</strong><p>路由、检索轨迹、引用片段和图谱关系</p>'
+                                    "<strong>推理与证据</strong><p>路由、检索轨迹、引用片段和图谱关系</p>"
                                     "</div></div>"
                                 )
                                 evidence_panel = gr.Markdown(
@@ -1634,6 +1689,19 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
             outputs=[conversation_selector, chatbot, memory_panel],
         )
         refresh_button.click(refresh_event, outputs=refresh_outputs)
+        build_timer = gr.Timer(5)
+        build_timer.tick(
+            lambda selected, document_ids, query: poll_build_status(
+                selected,
+                client,
+                document_ids,
+                query,
+            ),
+            inputs=[knowledge_base_selector, index_selector, graph_query],
+            outputs=[document_table, jobs_panel, graph_visualization],
+            show_progress="hidden",
+            concurrency_limit=1,
+        )
         knowledge_base_selector.change(
             lambda selected: refresh_assets(selected, client),
             inputs=[knowledge_base_selector],

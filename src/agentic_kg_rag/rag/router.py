@@ -7,8 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from starlette.concurrency import run_in_threadpool
 
+from agentic_kg_rag.build_cache import BuildCache
 from agentic_kg_rag.clients import normalize_openai_base_url
 from agentic_kg_rag.config import get_settings
+from agentic_kg_rag.embeddings import SafeEmbeddings
 from agentic_kg_rag.ingestion.router import get_ingestion_service
 from agentic_kg_rag.ingestion.service import IngestionError
 from agentic_kg_rag.knowledge_base.dependencies import get_knowledge_base_store
@@ -24,6 +26,8 @@ from agentic_kg_rag.rag.models import (
     SearchResponse,
 )
 from agentic_kg_rag.rag.service import RagError, RagService
+from agentic_kg_rag.resilience import ReliableChatModel
+from agentic_kg_rag.runtime_config import RUNTIME
 from agentic_kg_rag.stores.qdrant import create_qdrant_client
 
 router = APIRouter(prefix="/rag", tags=["rag"])
@@ -36,14 +40,26 @@ def get_rag_service() -> RagService:
         model=settings.embedding_model,
         base_url=normalize_openai_base_url(settings.embedding_base_url),
         api_key=settings.embedding_api_key or None,
-        check_embedding_ctx_length=settings.embedding_check_ctx_length,
+        check_embedding_ctx_length=False,
+        request_timeout=RUNTIME.models.embedding_timeout_seconds,
+        max_retries=0,
     )
-    chat_model = ChatOpenAI(
-        model=settings.chat_model,
-        base_url=normalize_openai_base_url(settings.chat_base_url),
-        api_key=settings.chat_api_key or None,
-        temperature=0,
-        max_retries=2,
+    embeddings = SafeEmbeddings(
+        embeddings,
+        model_name=settings.embedding_model,
+        endpoint=normalize_openai_base_url(settings.embedding_base_url) or "",
+        cache=BuildCache(settings.data_dir / "cache" / "embeddings.db"),
+    )
+    chat_model = ReliableChatModel(
+        ChatOpenAI(
+            model=settings.chat_model,
+            base_url=normalize_openai_base_url(settings.chat_base_url),
+            api_key=settings.chat_api_key or None,
+            temperature=0,
+            max_retries=0,
+            timeout=RUNTIME.models.chat_timeout_seconds,
+            max_tokens=4096,
+        )
     )
     qdrant = create_qdrant_client(
         mode=settings.qdrant_mode,
