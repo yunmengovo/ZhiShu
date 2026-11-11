@@ -11,6 +11,7 @@ import gradio as gr
 import httpx
 
 from agentic_kg_rag.config import get_settings
+from agentic_kg_rag.runtime_config import RUNTIME
 
 DOCUMENT_HEADERS = [
     "标题",
@@ -980,6 +981,31 @@ def refresh_question_scope(
         return gr.update(choices=[], value=[])
 
 
+def file_selection_summary(files: list[str] | None) -> str:
+    count = len(files or [])
+    if not count:
+        return "尚未选择文档。可一次多选，也可分多次添加或拖入。"
+    return f"已选择 **{count}** 份文档。可继续添加、拖入，或移除单个文件。"
+
+
+def append_file_selection(
+    existing: list[str] | None,
+    incoming: list[str] | None,
+) -> tuple[list[str], list[str], str]:
+    merged = list(existing or [])
+    seen = {str(Path(path).resolve()) for path in merged}
+    for path in incoming or []:
+        identity = str(Path(path).resolve())
+        if identity not in seen:
+            merged.append(path)
+            seen.add(identity)
+    limit = RUNTIME.ingestion.batch_upload_limit
+    if len(merged) > limit:
+        retained = list(existing or [])
+        return retained, retained, f"每批最多{limit}份文档，本次未追加；请减少新增文件。"
+    return merged, merged, file_selection_summary(merged)
+
+
 def upload_documents(
     files: list[str] | None,
     auto_index: bool,
@@ -1442,13 +1468,26 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                                 "<strong>批量导入资料</strong><p>支持 PDF、Word、Markdown、文本与 HTML</p>"
                                 "</div></div>"
                             )
+                            pending_files = gr.State([])
                             files = gr.File(
                                 label="选择或拖入多份文档",
                                 file_count="multiple",
                                 file_types=SUPPORTED_FILE_TYPES,
                                 type="filepath",
-                                height=250,
+                                height=200,
+                                elem_id="document-file-list",
                             )
+                            with gr.Row():
+                                add_files_button = gr.UploadButton(
+                                    "＋ 继续添加文档",
+                                    file_count="multiple",
+                                    type="filepath",
+                                    file_types=SUPPORTED_FILE_TYPES,
+                                    size="sm",
+                                    elem_id="add-documents-button",
+                                )
+                                clear_files_button = gr.Button("清空待导入列表", size="sm")
+                            selection_summary = gr.Markdown(file_selection_summary([]))
                             gr.HTML(
                                 '<div class="hint-strip">标准解析无需额外服务；复杂扫描 PDF 可选择 MinerU。</div>'
                             )
@@ -1728,6 +1767,41 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
             lambda selected, confirmed: delete_knowledge_base(selected, confirmed, client),
             inputs=[knowledge_base_selector, confirm_base_delete],
             outputs=[operation_output, *refresh_outputs],
+        )
+        file_events = {
+            "concurrency_id": "pending-document-selection",
+            "concurrency_limit": 1,
+            "show_progress": "hidden",
+        }
+        files.upload(
+            append_file_selection,
+            inputs=[pending_files, files],
+            outputs=[pending_files, files, selection_summary],
+            trigger_mode="multiple",
+            **file_events,
+        )
+        add_files_button.upload(
+            lambda current, incoming: (*append_file_selection(current, incoming), None),
+            inputs=[pending_files, add_files_button],
+            outputs=[pending_files, files, selection_summary, add_files_button],
+            trigger_mode="multiple",
+            **file_events,
+        )
+        files.delete(
+            lambda current: (current or [], file_selection_summary(current)),
+            inputs=[files],
+            outputs=[pending_files, selection_summary],
+            **file_events,
+        )
+        files.clear(
+            lambda: ([], file_selection_summary([])),
+            outputs=[pending_files, selection_summary],
+            **file_events,
+        )
+        clear_files_button.click(
+            lambda: ([], [], file_selection_summary([])),
+            outputs=[pending_files, files, selection_summary],
+            **file_events,
         )
         upload_button.click(
             lambda selected_files, should_index, should_graph, should_use_mineru, base_id: (

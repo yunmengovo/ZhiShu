@@ -409,3 +409,27 @@ def test_render_empty_evidence_and_build_ui() -> None:
     demo = build_ui(FakeBackend())
     assert isinstance(demo, gr.Blocks)
     assert len(demo.get_config_file()["dependencies"]) >= 6
+
+
+def test_file_selection_accumulates_and_deduplicates_paths(tmp_path: Path) -> None:
+    from agentic_kg_rag.ui import append_file_selection
+
+    a, b = str(tmp_path / "one.mdx"), str(tmp_path / "two.mdx")
+    state, displayed, summary = append_file_selection([], [a])
+    state, displayed, summary = append_file_selection(state, [b, a])
+    assert state == displayed == [a, b]
+    assert "2" in summary
+    # Different paths with identical names may have different contents; retain both.
+    other = str(tmp_path / "new" / "one.mdx")
+    state, displayed, _ = append_file_selection(state, [other])
+    assert state == displayed == [a, b, other]
+
+
+def test_file_selection_limit_preserves_existing_selection(tmp_path: Path) -> None:
+    from agentic_kg_rag.ui import append_file_selection
+
+    existing = [str(tmp_path / "one.mdx")]
+    incoming = [str(tmp_path / f"new-{i}.mdx") for i in range(50)]
+    state, displayed, message = append_file_selection(existing, incoming)
+    assert state == displayed == existing
+    assert "未追加" in message
