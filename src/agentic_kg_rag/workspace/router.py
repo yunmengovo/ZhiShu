@@ -54,9 +54,9 @@ def list_assets(
                 asset.build_message = job.message
                 asset.build_error = job.error
                 for stage in job.result.get("stage_errors") or {}:
-                    if stage == "vector":
-                        asset.vector_status = "failed"
-                    elif stage == "graph":
+                    if stage == "vector" and asset.indexed_chunks < asset.chunk_count:
+                        asset.vector_status = "partial" if asset.indexed_chunks else "failed"
+                    elif stage == "graph" and asset.graph_status != "ready":
                         asset.graph_status = "failed"
         return assets
     except KnowledgeBaseError as error:

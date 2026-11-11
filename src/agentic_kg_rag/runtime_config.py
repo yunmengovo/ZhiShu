@@ -32,6 +32,7 @@ class ModelRuntimeConfig(RuntimeSection):
     graph_generation_seconds: float = Field(default=180, ge=30, le=600)
     embedding_timeout_seconds: float = Field(default=30, ge=5, le=120)
     max_attempts: int = Field(default=3, ge=1, le=5)
+    queue_wait_seconds: float = Field(default=600, ge=10, le=1800)
     retry_budget_seconds: float = Field(default=300, ge=10, le=600)
     retry_base_delay: float = Field(default=1, ge=0.1, le=10)
     max_retry_delay: float = Field(default=15, ge=1, le=60)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import nullcontext
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -73,55 +74,56 @@ class RagService:
         if any(len(vector) != dimension for vector in vectors):
             raise RagError("embedding service returned vectors with inconsistent dimensions")
 
-        self._ensure_collection(dimension)
-        document_filter = models.Filter(
-            must=[
-                models.FieldCondition(
-                    key="document_id",
-                    match=models.MatchValue(value=document.document_id),
-                )
-            ]
-        )
-        points = []
-        for chunk, vector in zip(document.chunks, vectors, strict=True):
-            payload = {
-                "document_id": document.document_id,
-                "knowledge_base_id": document.knowledge_base_id,
-                "chunk_id": chunk.chunk_id,
-                "filename": document.filename,
-                "title": document.title,
-                "text": chunk.text,
-                "section_title": chunk.section_title,
-                "page_start": chunk.page_start,
-                "page_end": chunk.page_end,
-                "order": chunk.order,
-                "block_ids": chunk.block_ids,
-                "metadata": chunk.metadata,
-                "embedding_profile": self.embedding_profile,
-            }
-            points.append(
-                models.PointStruct(
-                    id=str(uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id)),
-                    vector=vector,
-                    payload=payload,
-                )
+        with getattr(self.qdrant, "storage_lock", nullcontext()):
+            self._ensure_collection(dimension)
+            document_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="document_id",
+                        match=models.MatchValue(value=document.document_id),
+                    )
+                ]
             )
-        self.qdrant.upsert(
-            collection_name=self.collection_name,
-            points=points,
-            wait=True,
-        )
-        # Upsert first: an upstream failure must never erase the working index.
-        self.qdrant.delete(
-            collection_name=self.collection_name,
-            points_selector=models.FilterSelector(
-                filter=models.Filter(
-                    must=document_filter.must,
-                    must_not=[models.HasIdCondition(has_id=[point.id for point in points])],
+            points = []
+            for chunk, vector in zip(document.chunks, vectors, strict=True):
+                payload = {
+                    "document_id": document.document_id,
+                    "knowledge_base_id": document.knowledge_base_id,
+                    "chunk_id": chunk.chunk_id,
+                    "filename": document.filename,
+                    "title": document.title,
+                    "text": chunk.text,
+                    "section_title": chunk.section_title,
+                    "page_start": chunk.page_start,
+                    "page_end": chunk.page_end,
+                    "order": chunk.order,
+                    "block_ids": chunk.block_ids,
+                    "metadata": chunk.metadata,
+                    "embedding_profile": self.embedding_profile,
+                }
+                points.append(
+                    models.PointStruct(
+                        id=str(uuid.uuid5(uuid.NAMESPACE_URL, chunk.chunk_id)),
+                        vector=vector,
+                        payload=payload,
+                    )
                 )
-            ),
-            wait=True,
-        )
+            self.qdrant.upsert(
+                collection_name=self.collection_name,
+                points=points,
+                wait=True,
+            )
+            # Upsert first: an upstream failure must never erase the working index.
+            self.qdrant.delete(
+                collection_name=self.collection_name,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=document_filter.must,
+                        must_not=[models.HasIdCondition(has_id=[point.id for point in points])],
+                    )
+                ),
+                wait=True,
+            )
         return IndexResult(
             document_id=document.document_id,
             filename=document.filename,

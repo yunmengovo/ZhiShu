@@ -347,3 +347,54 @@ def test_http_service_error_retries_with_retry_after_milliseconds() -> None:
         == "recovered"
     )
     assert len(calls) == 2 and 1.5 <= waits[0] <= 1.7
+
+
+def test_local_qdrant_concurrent_writes_and_reads_are_serialized(tmp_path: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from qdrant_client import models
+
+    from agentic_kg_rag.stores.qdrant import create_qdrant_client
+
+    q = create_qdrant_client(mode="local", path=tmp_path / "vectors", url="", api_key="")
+    q.create_collection(
+        "test", vectors_config=models.VectorParams(size=3, distance=models.Distance.COSINE)
+    )
+
+    def write(i):
+        q.upsert(
+            "test",
+            points=[models.PointStruct(id=i * 40 + j, vector=[1.0, 0.5, 0.3]) for j in range(40)],
+        )
+        q.count("test", exact=True)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(write, range(12)))
+    assert q.count("test", exact=True).count == 480
+    q.close()
+
+
+def test_queue_wait_does_not_consume_retry_budget(monkeypatch) -> None:
+    import agentic_kg_rag.resilience as module
+
+    clock = [0.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
+
+    class DelayedSlot:
+        def acquire(self, timeout):
+            clock[0] += 250
+            return True
+
+        def release(self):
+            pass
+
+    calls = []
+
+    def work():
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("synthetic timeout")
+        return "success"
+
+    assert call_model(work, label="测试", slots=DelayedSlot(), sleep=lambda _: None) == "success"
+    assert len(calls) == 2

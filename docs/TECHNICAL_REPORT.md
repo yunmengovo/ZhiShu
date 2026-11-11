@@ -388,3 +388,17 @@ SDK内置重试关闭，统一由应用层管理，避免嵌套重试倍增：
 - [LangChain嵌入接口](https://docs.langchain.com/oss/python/integrations/embeddings)：文档/查询向量接口。
 - [OpenAI限流与退避指南](https://developers.openai.com/api/docs/guides/rate-limits)：重试分类、随机退避及服务端等待。
 - [Qdrant混合查询](https://qdrant.tech/documentation/search/hybrid-queries/)：继续采用现有基于名次的证据融合；本轮没有新增BM25通道或宣称实现语义分块。
+
+
+## 17. 本地存储并发修正（2026-11-11）
+
+用临时目录及合成向量复现了本地Qdrant共享SQLite连接并发写入时的SystemError、
+OperationalError及DatabaseError。Local/Memory模式现在由同一可重入锁串行访问读写，
+首次建集合、upsert和旧chunk清理也在同一临界区；远程嵌入调用仍可并发，Server模式不受此锁影响。
+
+模型并发槽位排队单独计时，默认最多600秒，不再消耗300秒的模型重试预算；任务面板区分
+等待配额、请求发出与流式响应。最近任务失败不再将已经完整存在的向量覆盖显示为failed，
+构建失败原因仍保存在任务信息中。已有任务需重启后端后重新提交才能应用新行为。
+
+本轮没有增加规则抽取或NER模型，语义图谱抽取当前仍依赖LLM；也未将文档链接/实体共现
+冒充经验证的语义关系。新增本地多线程480点读写回归测试及排队预算回归测试。

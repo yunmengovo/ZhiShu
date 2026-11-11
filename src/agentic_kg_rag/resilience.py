@@ -98,8 +98,18 @@ def call_model(
     started = time.monotonic()
     for attempt in range(1, maximum + 1):
         remaining = policy.retry_budget_seconds - (time.monotonic() - started)
-        if remaining <= 0 or not slots.acquire(timeout=max(0, remaining)):
-            raise ModelCallError(f"{label}排队或重试超过时间预算，请稍后重试")
+        if remaining <= 0:
+            raise ModelCallError(f"{label}已达到重试时间预算")
+        observer = notice.get()
+        if observer:
+            observer(f"正在等待{label}并发配额")
+        queued_at = time.monotonic()
+        if not slots.acquire(timeout=policy.queue_wait_seconds):
+            raise ModelCallError(f"{label}排队等待超过上限，尚未发起本次请求")
+        # Queue wait is not model execution/retry time.
+        started += time.monotonic() - queued_at
+        if observer:
+            observer(f"已获得{label}并发配额，正在发送请求")
         try:
             return operation()
         except Exception as error:
