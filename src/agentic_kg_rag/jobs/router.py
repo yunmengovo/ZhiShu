@@ -51,6 +51,7 @@ def submit_document_rebuild(
             rebuild_vector=request.rebuild_vector,
             rebuild_graph=request.rebuild_graph,
             progress=progress,
+            graph_mode=request.graph_mode,
         )
         progress(95, "正在写入最终状态")
         return result.model_dump(mode="json")

@@ -73,7 +73,11 @@ class JobManager:
                 job_id,
                 status="succeeded",
                 progress=100,
-                message="任务执行完成",
+                message=(
+                    "结构图已就绪；部分语义关系待补全"
+                    if result.get("graph_warnings")
+                    else "任务执行完成"
+                ),
                 result=result,
                 error="",
             )

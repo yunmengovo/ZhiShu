@@ -4,7 +4,10 @@ from collections.abc import Callable
 
 from agentic_kg_rag.ingestion.service import DocumentIngestionService
 from agentic_kg_rag.knowledge_base.store import KnowledgeBaseStore
-from agentic_kg_rag.knowledge_graph.service import KnowledgeGraphService
+from agentic_kg_rag.knowledge_graph.service import (
+    KnowledgeGraphExtractionError,
+    KnowledgeGraphService,
+)
 from agentic_kg_rag.rag.service import RagService
 from agentic_kg_rag.resilience import ModelCallError
 from agentic_kg_rag.workspace.models import (
@@ -92,6 +95,7 @@ class WorkspaceService:
         rebuild_vector: bool,
         rebuild_graph: bool,
         progress: Callable[[int, str], None] | None = None,
+        graph_mode: str = "hybrid",
     ) -> DocumentRebuildResult:
         document = self.ingestion.reprocess(document_id) if reparse else None
         loaded = self.ingestion.load(document_id)
@@ -99,6 +103,7 @@ class WorkspaceService:
         entity_count = 0
         relationship_count = 0
         failures = {}
+        graph_warnings = []
         if rebuild_vector:
             if progress:
                 progress(15, "正在构建向量索引（成功片段会缓存）")
@@ -116,19 +121,23 @@ class WorkspaceService:
             try:
                 extraction = self.graph.extract_document(
                     document_id,
+                    extraction_mode=graph_mode,
                     progress=(lambda value, message: progress(45 + value // 2, message))
                     if progress
                     else None,
                 )
+                graph_warnings = getattr(extraction, "warnings", [])
                 entity_count = extraction.entity_count
                 relationship_count = extraction.relationship_count
             except Exception as error:  # noqa: BLE001 - independent stage boundary
                 failures["graph"] = (
                     str(error)
-                    if isinstance(error, ModelCallError)
+                    if isinstance(error, (ModelCallError, KnowledgeGraphExtractionError))
                     else f"图谱构建失败（{type(error).__name__}）"
                 )
         result = DocumentRebuildResult(
+            graph_warnings=graph_warnings,
+            graph_mode=graph_mode if rebuild_graph else "",
             document_id=document_id,
             filename=(document.filename if document else loaded.filename),
             reparsed=reparse,

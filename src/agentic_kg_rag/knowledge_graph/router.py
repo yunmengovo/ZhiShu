@@ -52,6 +52,7 @@ def get_knowledge_graph_service() -> KnowledgeGraphService:
         chat_model=ReliableChatModel(rag_service.chat_model.model, stream=True),
         model_name=settings.chat_model,
         mode=mode,
+        extraction_mode="hybrid",
         batch_chars=settings.kg_extraction_batch_chars,
         default_top_k=settings.graph_top_k,
         cache=BuildCache(settings.data_dir / "cache" / "graph_batches.db"),
@@ -104,6 +105,7 @@ async def graph_subgraph(
             query=request.query,
             document_ids=request.document_ids,
             limit=request.limit,
+            layer=request.layer,
         )
     except KnowledgeGraphError as error:
         raise HTTPException(status_code=error.status_code, detail=str(error)) from error

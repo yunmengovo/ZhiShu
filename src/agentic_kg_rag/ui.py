@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import math
 import mimetypes
+import unicodedata
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -282,13 +283,13 @@ body, .gradio-container { background: var(--zs-bg) !important; }
 .manager-row { align-items: end !important; gap: 10px !important; }
 .manager-row button { min-width: 96px !important; }
 .graph-canvas {
-  min-height: 420px;
+  min-height: 240px;
   overflow: hidden;
   border: 1px solid #dce8f3;
   border-radius: 16px;
   background: radial-gradient(circle at 50% 48%, #f8fdff 0%, #f3f7fb 70%);
 }
-.graph-canvas svg { display: block; width: 100%; height: auto; min-height: 420px; }
+.graph-canvas svg { display: block; width: 100%; height: auto; min-height: 240px; }
 .graph-empty { display: grid; place-items: center; min-height: 300px; color: var(--zs-muted); }
 .job-list { display: grid; gap: 8px; }
 .job-row { padding: 10px 12px; border-radius: 12px; background: #f5f8fc; }
@@ -458,6 +459,7 @@ class BackendClient:
         reparse: bool = True,
         rebuild_vector: bool = True,
         rebuild_graph: bool = True,
+        graph_mode: str = "hybrid",
     ) -> dict[str, Any]:
         return self._request(
             "POST",
@@ -466,6 +468,7 @@ class BackendClient:
                 "reparse": reparse,
                 "rebuild_vector": rebuild_vector,
                 "rebuild_graph": rebuild_graph,
+                "graph_mode": graph_mode,
             },
         )
 
@@ -478,11 +481,17 @@ class BackendClient:
         query: str = "",
         document_ids: list[str] | None = None,
         limit: int = 80,
+        layer: str = "all",
     ) -> dict[str, Any]:
         return self._request(
             "POST",
             "/graph/subgraph",
-            json={"query": query, "document_ids": document_ids or [], "limit": limit},
+            json={
+                "query": query,
+                "document_ids": document_ids or [],
+                "limit": limit,
+                "layer": layer,
+            },
         )
 
     def ask(
@@ -556,6 +565,7 @@ def _document_rows(documents: list[dict[str, Any]]) -> list[list[Any]]:
             f"{item.get('vector_status', 'unknown')} · {item.get('indexed_chunks', 0)}",
             f"{item.get('entity_count', 0)} / {item.get('relationship_count', 0)}",
             item["status"]
+            + (" / 结构就绪，语义待补全" if item.get("graph_status") == "partial" else "")
             + " / "
             + {
                 "queued": "排队中",
@@ -577,8 +587,8 @@ def _status_markdown(
     integrations: dict[str, Any] | None = None,
 ) -> str:
     collection_state = "已就绪" if status["collection_ready"] else "未建立"
-    chat_state = "正常" if status["chat_configured"] else "缺少配置"
-    embedding_state = "正常" if status["embedding_configured"] else "缺少配置"
+    chat_state = "已配置" if status["chat_configured"] else "缺少配置"
+    embedding_state = "已配置" if status["embedding_configured"] else "缺少配置"
     graph_connected = graph_status.get("connected", True)
     graph_icon = "🟢" if graph_connected else "🟠"
     graph_backend = graph_status.get("backend", graph_status.get("mode", "unknown"))
@@ -601,7 +611,9 @@ def _status_markdown(
         f"<strong>{html.escape(str(graph_backend))}</strong><small>{graph_status['entity_count']} 个实体 · "
         f"{graph_status['relationship_count']} 条关系 {graph_icon}</small></div>"
         '<div class="status-card"><div class="label"><i class="dot"></i>模型服务</div>'
-        f"<strong>{chat_state} / {embedding_state}</strong><small>Chat / Embedding</small></div>"
+        f"<strong>{chat_state} / {embedding_state}</strong>"
+        f"<small>Chat：{html.escape(str(status.get('chat_model') or '未返回模型名'))}</small>"
+        f"<small>Embedding：{html.escape(str(status.get('embedding_model') or '未返回模型名'))}</small></div>"
         '<div class="status-card"><div class="label"><i class="dot"></i>可选增强</div>'
         f"<strong>{optional_count} / 3 已启用</strong><small>MinerU / Tavily / LangSmith</small></div>"
         "</div>"
@@ -790,6 +802,10 @@ def render_jobs(jobs: list[dict[str, Any]]) -> str:
         progress = int(job.get("progress", 0))
         status = labels.get(job.get("status", ""), job.get("status", "unknown"))
         message = job.get("error") or job.get("message") or ""
+        warnings = (job.get("result") or {}).get("graph_warnings", [])
+        if warnings:
+            status = "部分完成 · 语义待补全"
+            message += "；" + "；".join(warnings[:2])
         rows.append(
             '<div class="job-row">'
             f"<strong>{html.escape(str(job.get('job_type', 'task')))}</strong>"
@@ -802,70 +818,91 @@ def render_jobs(jobs: list[dict[str, Any]]) -> str:
 
 
 def render_graph_visualization(graph: dict[str, Any]) -> str:
-    nodes = graph.get("nodes", [])
-    edges = graph.get("edges", [])
-    if not nodes or not edges:
-        return (
-            '<div class="graph-canvas"><div class="graph-empty">'
-            "当前范围还没有可展示的关系，请先抽取知识图谱。"
-            "</div></div>"
-        )
-    width, height = 960, 520
-    center_x, center_y = width / 2, height / 2
-    radius = min(width, height) * 0.37
-    positions: dict[str, tuple[float, float]] = {}
-    for index, node in enumerate(nodes):
-        ring = 1 if len(nodes) <= 24 or index < 24 else 0.62
-        ring_items = min(len(nodes), 24) if ring == 1 else max(1, len(nodes) - 24)
-        ring_index = index if ring == 1 else index - 24
-        angle = (2 * math.pi * ring_index / ring_items) - math.pi / 2
-        positions[node["node_id"]] = (
-            center_x + radius * ring * math.cos(angle),
-            center_y + radius * ring * math.sin(angle),
-        )
-    palette = ["#2563eb", "#0891b2", "#0f766e", "#7c3aed", "#c2410c", "#be185d"]
-    svg = [
-        (
-            '<div class="graph-canvas"><svg viewBox="0 0 960 520" role="img" '
-            'aria-label="知识图谱关系图">'
-        ),
-        (
-            '<defs><marker id="zs-arrow" viewBox="0 0 10 10" refX="9" refY="5" '
-            'markerWidth="5" markerHeight="5" orient="auto-start-reverse">'
-            '<path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/></marker></defs>'
-        ),
-    ]
-    for edge in edges:
-        source = positions.get(edge["source_id"])
-        target = positions.get(edge["target_id"])
-        if not source or not target:
+    all_nodes = {n["node_id"]: n for n in graph.get("nodes", [])}
+    all_edges = graph.get("edges", [])
+    if not all_nodes or not all_edges:
+        return '<div class="graph-canvas"><div class="graph-empty">当前筛选范围暂无关系，可切换图谱层，或选择文档构建图谱。</div></div>'
+    # A bounded readable subgraph; the full graph remains in storage.
+    selected, edges = {}, []
+    for edge in all_edges:
+        ids = [edge["source_id"], edge["target_id"]]
+        if any(i not in all_nodes for i in ids):
             continue
-        x1, y1 = source
-        x2, y2 = target
-        label_x, label_y = (x1 + x2) / 2, (y1 + y2) / 2
-        svg.append(
-            f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
-            'stroke="#b8c5d6" stroke-width="1.4" marker-end="url(#zs-arrow)"/>'
-            f'<text x="{label_x:.1f}" y="{label_y - 5:.1f}" text-anchor="middle" '
-            'font-size="9" fill="#64748b" paint-order="stroke" stroke="#f6fafc" '
-            f'stroke-width="3">{html.escape(str(edge["relation"]))}</text>'
+        if len(set(selected).union(ids)) > 12:
+            continue
+        selected.update({i: all_nodes[i] for i in ids})
+        edges.append(edge)
+        if len(edges) >= 16:
+            break
+    nodes = list(selected.values())
+    rows = max(1, math.ceil(len(nodes) / 3))
+    height = rows * 150 + 60
+    positions = {
+        n["node_id"]: (165 + (i % 3) * 310, 65 + (i // 3) * 150) for i, n in enumerate(nodes)
+    }
+    out = [
+        f'<div class="hint-strip">展示 {len(nodes)} 个节点 / {len(edges)} 条关系；请按文档或关键词缩小范围。实线表示有向关系，完整名称和证据见下表。</div>',
+        f'<div class="graph-canvas"><svg viewBox="0 0 960 {height}" role="img" aria-label="知识图谱关系图">',
+        '<defs><marker id="zs-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/></marker></defs>',
+    ]
+    for e in edges:
+        x1, y1 = positions[e["source_id"]]
+        x2, y2 = positions[e["target_id"]]
+        dx, dy = x2 - x1, y2 - y1
+        scale = min(138 / abs(dx) if dx else float("inf"), 40 / abs(dy) if dy else float("inf"))
+        if not math.isfinite(scale):
+            continue
+        sx, sy = x1 + dx * scale, y1 + 10 + dy * scale
+        tx, ty = x2 - dx * scale, y2 + 10 - dy * scale
+        tooltip = html.escape(
+            f"{e['relation']} · {e.get('description', '')} · {e.get('chunk_id', '')}"
         )
-    for node in nodes:
-        x, y = positions[node["node_id"]]
-        entity_type = str(node.get("entity_type", "Concept"))
-        color = palette[sum(ord(char) for char in entity_type) % len(palette)]
-        label = str(node["label"])
-        short_label = label if len(label) <= 15 else label[:14] + "…"
-        svg.append(
-            f"<g><title>{html.escape(label)} · {html.escape(entity_type)}</title>"
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="22" fill="{color}" opacity=".94"/>'
-            f'<text x="{x:.1f}" y="{y + 4:.1f}" text-anchor="middle" font-size="9" '
-            f'font-weight="700" fill="#fff">{html.escape(short_label[:7])}</text>'
-            f'<text x="{x:.1f}" y="{y + 37:.1f}" text-anchor="middle" font-size="10" '
-            f'fill="#334155">{html.escape(short_label)}</text></g>'
+        out.append(
+            f'<path d="M{sx} {sy} Q{(sx + tx) / 2} {(sy + ty) / 2 + 12} {tx} {ty}" fill="none" stroke="#94a3b8" marker-end="url(#zs-arrow)"><title>{tooltip}</title></path>'
         )
-    svg.append("</svg></div>")
-    return "".join(svg)
+    for n in nodes:
+        x, y = positions[n["node_id"]]
+        name = str(n["label"])
+        kind = str(n.get("entity_type", "Concept"))
+        color = "#0891b2" if kind in {"Document", "Section", "Reference"} else "#2563eb"
+        out.append(
+            f'<g><title>{html.escape(name)} · {html.escape(kind)}</title><rect x="{x - 138}" y="{y - 30}" width="276" height="80" rx="12" fill="white" stroke="{color}" stroke-width="2"/>'
+        )
+        lines, text, width = [], "", 0
+        for char in name:
+            units = 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+            if width + units > 36:
+                lines.append(text)
+                text, width = "", 0
+            text += char
+            width += units
+        lines.append(text)
+        for line, text in enumerate(lines[:3]):
+            out.append(
+                f'<text x="{x}" y="{y - 7 + line * 17}" text-anchor="middle" font-size="12" fill="#17233b">{html.escape(text)}</text>'
+            )
+        out.append("</g>")
+    out.append(
+        '</svg></div><details open><summary>关系、类型与原文证据</summary><div style="overflow:auto;max-height:420px"><table style="width:100%;font-size:13px"><thead><tr><th>来源实体</th><th>关系</th><th>目标实体</th><th>类型 / 证据</th></tr></thead><tbody>'
+    )
+    for e in edges:
+        kind = "文档结构" if e["relation"].startswith("DOC_") else "语义关系"
+        cells = [
+            selected[e["source_id"]]["label"],
+            e["relation"],
+            selected[e["target_id"]]["label"],
+            f"{kind}：{e.get('description', '')} · {e.get('document_id', '')} / {e.get('chunk_id', '')}",
+        ]
+        out.append(
+            "<tr>"
+            + "".join(
+                f'<td style="padding:8px;border-bottom:1px solid #e2e8f0;word-break:break-word">{html.escape(str(c))}</td>'
+                for c in cells
+            )
+            + "</tr>"
+        )
+    out.append("</tbody></table></div></details>")
+    return "".join(out)
 
 
 def refresh_workspace(
@@ -947,6 +984,7 @@ def poll_build_status(
     client: BackendClient,
     selected_ids: list[str] | None = None,
     query: str = "",
+    layer: str = "all",
 ) -> tuple[Any, Any, Any]:
     try:
         if not knowledge_base_id:
@@ -955,6 +993,7 @@ def poll_build_status(
         graph = (
             client.graph_subgraph(
                 query=query,
+                layer=layer,
                 document_ids=selected_ids or [item["document_id"] for item in assets],
                 limit=80,
             )
@@ -1247,18 +1286,36 @@ def queue_selected_rebuilds(
     return "### 已提交后台任务\n" + "\n".join(lines), render_jobs(client.list_jobs())
 
 
+def queue_structure_builds(
+    document_ids: list[str] | None, client: BackendClient
+) -> tuple[str, str]:
+    lines = []
+    for doc in document_ids or []:
+        try:
+            job = client.submit_document_rebuild(
+                doc, reparse=False, rebuild_vector=False, rebuild_graph=True, graph_mode="structure"
+            )
+            lines.append(f"- {doc}：{job['job_id']}")
+        except BackendError as error:
+            lines.append(str(error))
+    return "### 文档结构构建（无需 LLM）\n" + "\n".join(lines or ["请先选择文档"]), render_jobs(
+        client.list_jobs()
+    )
+
+
 def refresh_graph_view(
     document_ids: list[str] | None,
     knowledge_base_id: str | None,
     query: str,
     client: BackendClient,
+    layer: str = "all",
 ) -> str:
     try:
         selected = document_ids or [
             item["document_id"] for item in client.list_assets(knowledge_base_id)
         ]
         return render_graph_visualization(
-            client.graph_subgraph(query=query.strip(), document_ids=selected, limit=80)
+            client.graph_subgraph(query=query.strip(), document_ids=selected, limit=80, layer=layer)
         )
     except BackendError:
         return render_graph_visualization({})
@@ -1531,17 +1588,18 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                             )
                             with gr.Row():
                                 index_button = gr.Button("重建向量索引", scale=1)
-                                graph_button = gr.Button("抽取知识图谱", scale=1)
+                                graph_button = gr.Button("构建图谱（结构＋语义）", scale=1)
                                 rebuild_button = gr.Button("后台完整重建", scale=1)
                                 delete_document_button = gr.Button(
                                     "删除文档",
                                     scale=1,
                                     elem_classes="danger-button",
                                 )
-                            confirm_document_delete = gr.Checkbox(
-                                value=False,
-                                label="确认删除所选文档及其向量和图谱数据",
-                            )
+                            structure_button = gr.Button("仅构建文档结构图（无需 LLM）", size="sm")
+                        confirm_document_delete = gr.Checkbox(
+                            value=False,
+                            label="确认删除所选文档及其向量和图谱数据",
+                        )
 
                     with gr.Column(elem_classes=["surface-card", "graph-card"]):
                         gr.HTML(
@@ -1556,6 +1614,15 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
                                 scale=6,
                             )
                             graph_refresh_button = gr.Button("刷新图谱", scale=1)
+                        graph_layer = gr.Radio(
+                            choices=[
+                                ("全部", "all"),
+                                ("语义关系（原文证据）", "semantic"),
+                                ("文档结构（章节与引用）", "structure"),
+                            ],
+                            value="all",
+                            label="图谱层",
+                        )
                         graph_visualization = gr.HTML(render_graph_visualization({}))
 
                     with gr.Column(elem_classes=["surface-card", "jobs-card"]):
@@ -1730,13 +1797,14 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
         refresh_button.click(refresh_event, outputs=refresh_outputs)
         build_timer = gr.Timer(5)
         build_timer.tick(
-            lambda selected, document_ids, query: poll_build_status(
+            lambda selected, document_ids, query, layer: poll_build_status(
                 selected,
                 client,
                 document_ids,
                 query,
+                layer,
             ),
-            inputs=[knowledge_base_selector, index_selector, graph_query],
+            inputs=[knowledge_base_selector, index_selector, graph_query, graph_layer],
             outputs=[document_table, jobs_panel, graph_visualization],
             show_progress="hidden",
             concurrency_limit=1,
@@ -1841,6 +1909,11 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
             inputs=[index_selector, knowledge_base_selector],
             outputs=[operation_output, status_panel, document_table, graph_visualization],
         )
+        structure_button.click(
+            lambda selected: queue_structure_builds(selected, client),
+            inputs=[index_selector],
+            outputs=[operation_output, jobs_panel],
+        )
         rebuild_button.click(
             lambda selected: queue_selected_rebuilds(selected, client),
             inputs=[index_selector],
@@ -1865,13 +1938,21 @@ def build_ui(client: BackendClient | None = None) -> gr.Blocks:
             ],
         )
         graph_refresh_button.click(
-            lambda selected, base_id, query: refresh_graph_view(
+            lambda selected, base_id, query, layer: refresh_graph_view(
                 selected,
                 base_id,
                 query,
                 client,
+                layer,
             ),
-            inputs=[index_selector, knowledge_base_selector, graph_query],
+            inputs=[index_selector, knowledge_base_selector, graph_query, graph_layer],
+            outputs=[graph_visualization],
+        )
+        graph_layer.change(
+            lambda selected, base_id, query, layer: refresh_graph_view(
+                selected, base_id, query, client, layer
+            ),
+            inputs=[index_selector, knowledge_base_selector, graph_query, graph_layer],
             outputs=[graph_visualization],
         )
         refresh_jobs_button.click(

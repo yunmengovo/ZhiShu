@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -35,12 +36,15 @@ class DocumentDeleteResult(BaseModel):
 
 
 class DocumentRebuildRequest(BaseModel):
+    graph_mode: Literal["hybrid", "structure", "semantic"] = "hybrid"
     reparse: bool = True
     rebuild_vector: bool = True
     rebuild_graph: bool = True
 
 
 class DocumentRebuildResult(BaseModel):
+    graph_warnings: list[str] = Field(default_factory=list)
+    graph_mode: str = ""
     document_id: str
     filename: str
     reparsed: bool

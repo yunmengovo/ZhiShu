@@ -61,6 +61,8 @@ class AskResponse(BaseModel):
 
 
 class RagStatus(BaseModel):
+    chat_model: str = ""
+    embedding_model: str = ""
     mode: str
     collection: str
     collection_ready: bool

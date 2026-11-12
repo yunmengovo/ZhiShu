@@ -101,3 +101,34 @@ def build_chunks(
                 )
             )
     return chunks
+
+
+def prose_chunks(blocks: list[SourceBlock], chunks: list[DocumentChunk]) -> list[DocumentChunk]:
+    """Mask fenced code using source offsets, keeping existing chunk IDs and provenance."""
+    code_spans: dict[str, tuple[int, int]] = {}
+    for segment in _group_blocks(blocks):
+        offset = 0
+        for bid, text in zip(segment.block_ids, segment.texts, strict=True):
+            code_spans[bid] = (offset, offset + len(text))
+            offset += len(text) + 1
+    code_ids = {b.block_id for b in blocks if b.metadata.get("content_type") == "code"}
+    result = []
+    for chunk in chunks:
+        code = code_ids.intersection(chunk.block_ids)
+        if not code:
+            result.append(chunk)
+            continue
+        start = chunk.metadata.get("segment_start")
+        if start is None:
+            # Older provenance cannot safely locate code: omit the mixed chunk conservatively.
+            continue
+        chars = list(chunk.text)
+        for bid in code:
+            left, right = code_spans[bid]
+            for i in range(max(0, left - start), min(len(chars), right - start)):
+                if chars[i] != "\n":
+                    chars[i] = " "
+        text = "".join(chars)
+        if text.strip():
+            result.append(chunk.model_copy(update={"text": text}))
+    return result

@@ -42,6 +42,7 @@ def split_utf8(text: str, budget: int) -> list[str]:
 class SafeEmbeddings:
     def __init__(self, model: Any, *, model_name: str, endpoint: str, cache: BuildCache) -> None:
         self.model = model
+        self.model_name = model_name
         self.cache = cache
         self.namespace = hashlib.sha256(
             f"embedding-v1:{endpoint}:{model_name}".encode()

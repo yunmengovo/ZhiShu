@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -20,6 +22,7 @@ class ExtractedRelationship(BaseModel):
     relation_type: str = Field(alias="type", min_length=1, max_length=100)
     description: str = Field(default="", max_length=1000)
     chunk_id: str = Field(min_length=1, max_length=100)
+    evidence_text: str = ""
 
 
 class ExtractionPayload(BaseModel):
@@ -28,6 +31,9 @@ class ExtractionPayload(BaseModel):
 
 
 class GraphExtractionResult(BaseModel):
+    extraction_mode: str = "semantic"
+    warnings: list[str] = Field(default_factory=list)
+    failed_batches: int = 0
     document_id: str
     filename: str
     batches: int = Field(ge=0)
@@ -87,6 +93,7 @@ class GraphEdge(BaseModel):
 class GraphSubgraphRequest(BaseModel):
     query: str = Field(default="", max_length=4000)
     document_ids: list[str] = Field(default_factory=list)
+    layer: Literal["all", "semantic", "structure"] = "all"
     limit: int = Field(default=80, ge=1, le=500)
 
 

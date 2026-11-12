@@ -290,6 +290,8 @@ class RagService:
                 exact=True,
             ).count
         return RagStatus(
+            chat_model=self.model_name,
+            embedding_model=getattr(self.embeddings, "model_name", ""),
             mode=self.mode,
             collection=self.collection_name,
             collection_ready=ready,

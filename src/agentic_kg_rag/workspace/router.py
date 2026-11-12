@@ -53,6 +53,10 @@ def list_assets(
                 asset.build_status = job.status
                 asset.build_message = job.message
                 asset.build_error = job.error
+                if job.result.get("graph_warnings"):
+                    asset.graph_status = "partial"
+                elif job.result.get("graph_mode") == "structure":
+                    asset.build_message = "文档结构图已就绪（未抽取语义关系）"
                 for stage in job.result.get("stage_errors") or {}:
                     if stage == "vector" and asset.indexed_chunks < asset.chunk_count:
                         asset.vector_status = "partial" if asset.indexed_chunks else "failed"
@@ -84,6 +88,7 @@ async def rebuild_document(
         return await run_in_threadpool(
             service.rebuild_document,
             document_id,
+            graph_mode=request.graph_mode,
             reparse=request.reparse,
             rebuild_vector=request.rebuild_vector,
             rebuild_graph=request.rebuild_graph,

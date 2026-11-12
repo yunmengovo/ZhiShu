@@ -64,6 +64,8 @@ class FakeBackend:
             "collection": "document_chunks",
             "collection_ready": True,
             "indexed_chunks": 4,
+            "chat_model": "deepseek-chat",
+            "embedding_model": "BAAI/bge-large-zh-v1.5",
             "chat_configured": True,
             "embedding_configured": True,
         }
@@ -142,6 +144,7 @@ class FakeBackend:
         self,
         *,
         query: str = "",
+        layer: str = "all",
         document_ids: list[str] | None = None,
         limit: int = 80,
     ) -> dict[str, Any]:
@@ -433,3 +436,26 @@ def test_file_selection_limit_preserves_existing_selection(tmp_path: Path) -> No
     state, displayed, message = append_file_selection(existing, incoming)
     assert state == displayed == existing
     assert "未追加" in message
+
+
+def test_model_names_and_partial_semantic_status_are_visible() -> None:
+    from agentic_kg_rag.ui import _status_markdown, render_jobs
+
+    backend = FakeBackend()
+    status = _status_markdown(backend.rag_status(), backend.graph_status(), 1)
+    assert "deepseek-chat" in status
+    assert "BAAI/bge-large-zh-v1.5" in status
+    assert "已配置" in status
+    jobs = render_jobs(
+        [
+            {
+                "status": "succeeded",
+                "progress": 100,
+                "result": {
+                    "graph_warnings": ["批次2未通过原文校验"],
+                },
+            }
+        ]
+    )
+    assert "语义待补全" in jobs
+    assert "批次2未通过原文校验" in jobs
